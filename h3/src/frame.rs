@@ -185,6 +185,13 @@ where
         self.stream.reset(reset_code)
     }
 
+    fn poll_stopped(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<u64>, StreamErrorIncoming>> {
+        self.stream.poll_stopped(cx)
+    }
+
     fn send_id(&self) -> StreamId {
         self.stream.send_id()
     }

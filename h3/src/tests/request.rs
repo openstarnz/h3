@@ -1662,3 +1662,182 @@ async fn finish_after_cancelled_send_data_keeps_connection_open() {
 
     tokio::join!(server_fut, client_fut);
 }
+
+/// A server waiting for the application to produce a response learns from `stopped` that the
+/// client sent STOP_SENDING, without having to write to the stream.
+#[tokio::test]
+async fn server_stopped_by_client() {
+    init_tracing();
+    let mut pair = Pair::default();
+    let mut server = pair.server();
+    let (stop_tx, stop_rx) = futures::channel::oneshot::channel::<()>();
+    let (done_tx, done_rx) = futures::channel::oneshot::channel::<()>();
+
+    let client_fut = async {
+        let (mut driver, mut client) = client::new(pair.client().await).await.expect("client init");
+        let drive_fut = async { future::poll_fn(|cx| driver.poll_close(cx)).await };
+        let req_fut = async move {
+            let mut request_stream = client
+                .send_request(Request::get("http://localhost/salut").body(()).unwrap())
+                .await
+                .expect("request");
+            request_stream.finish().await.expect("finish");
+
+            stop_rx.await.expect("stop signal");
+            request_stream.stop_sending(Code::H3_REQUEST_CANCELLED);
+            done_rx.await.expect("done signal");
+        };
+        tokio::join!(req_fut, drive_fut)
+    };
+
+    let server_fut = async {
+        let conn = server.next().await;
+        let mut incoming_req = server::Connection::new(conn).await.unwrap();
+
+        let (_request, mut request_stream) = get_stream_blocking(&mut incoming_req)
+            .await
+            .expect("accept");
+        future::poll_fn(|cx| {
+            assert!(request_stream.poll_stopped(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+
+        stop_tx.send(()).unwrap();
+        assert_matches!(
+            request_stream.stopped().await,
+            Ok(Some(code)) if code == Code::H3_REQUEST_CANCELLED
+        );
+        done_tx.send(()).unwrap();
+
+        assert_matches!(
+            incoming_req.accept().await.err().unwrap(),
+            ConnectionError::Remote(ConnectionErrorIncoming::ApplicationClose{error_code: code, ..})
+            if code == Code::H3_NO_ERROR.value()
+        );
+    };
+
+    tokio::join!(server_fut, client_fut);
+}
+
+/// `stopped` resolves without a code once the response is finished and the client has received
+/// all of it.
+#[tokio::test]
+async fn server_stopped_after_finish() {
+    init_tracing();
+    let mut pair = Pair::default();
+    let mut server = pair.server();
+    let (done_tx, done_rx) = futures::channel::oneshot::channel::<()>();
+
+    let client_fut = async {
+        let (mut driver, mut client) = client::new(pair.client().await).await.expect("client init");
+        let drive_fut = async { future::poll_fn(|cx| driver.poll_close(cx)).await };
+        let req_fut = async move {
+            let mut request_stream = client
+                .send_request(Request::get("http://localhost/salut").body(()).unwrap())
+                .await
+                .expect("request");
+            request_stream.finish().await.expect("finish");
+
+            let response = request_stream.recv_response().await.expect("recv response");
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(request_stream
+                .recv_data()
+                .await
+                .expect("recv data")
+                .is_none());
+            done_rx.await.expect("done signal");
+        };
+        tokio::join!(req_fut, drive_fut)
+    };
+
+    let server_fut = async {
+        let conn = server.next().await;
+        let mut incoming_req = server::Connection::new(conn).await.unwrap();
+
+        let (_request, mut request_stream) = get_stream_blocking(&mut incoming_req)
+            .await
+            .expect("accept");
+        request_stream
+            .send_response(
+                Response::builder()
+                    .status(200)
+                    .body(())
+                    .expect("build response"),
+            )
+            .await
+            .expect("send_response");
+        request_stream.finish().await.expect("finish");
+
+        assert_matches!(request_stream.stopped().await, Ok(None));
+        done_tx.send(()).unwrap();
+
+        assert_matches!(
+            incoming_req.accept().await.err().unwrap(),
+            ConnectionError::Remote(ConnectionErrorIncoming::ApplicationClose{error_code: code, ..})
+            if code == Code::H3_NO_ERROR.value()
+        );
+    };
+
+    tokio::join!(server_fut, client_fut);
+}
+
+/// A client learns from `stopped` that the server does not want the rest of the request body,
+/// and can still receive the response.
+#[tokio::test]
+async fn client_stopped_by_server() {
+    init_tracing();
+    let mut pair = Pair::default();
+    let mut server = pair.server();
+
+    let client_fut = async {
+        let (mut driver, mut client) = client::new(pair.client().await).await.expect("client init");
+        let drive_fut = async { future::poll_fn(|cx| driver.poll_close(cx)).await };
+        let req_fut = async move {
+            let mut request_stream = client
+                .send_request(Request::post("http://localhost/salut").body(()).unwrap())
+                .await
+                .expect("request");
+
+            assert_matches!(
+                request_stream.stopped().await,
+                Ok(Some(code)) if code == Code::H3_NO_ERROR
+            );
+
+            let response = request_stream.recv_response().await.expect("recv response");
+            assert_eq!(response.status(), StatusCode::OK);
+        };
+        tokio::join!(req_fut, drive_fut)
+    };
+
+    let server_fut = async {
+        let conn = server.next().await;
+        let mut incoming_req = server::Connection::new(conn).await.unwrap();
+
+        let (_request, mut request_stream) = get_stream_blocking(&mut incoming_req)
+            .await
+            .expect("accept");
+
+        // RFC 9114 section 4.1: a server that does not need the rest of the request can abort
+        // reading it with H3_NO_ERROR and send a complete response.
+        request_stream.stop_sending(Code::H3_NO_ERROR);
+        request_stream
+            .send_response(
+                Response::builder()
+                    .status(200)
+                    .body(())
+                    .expect("build response"),
+            )
+            .await
+            .expect("send_response");
+        request_stream.finish().await.expect("finish");
+
+        assert_matches!(
+            incoming_req.accept().await.err().unwrap(),
+            ConnectionError::Remote(ConnectionErrorIncoming::ApplicationClose{error_code: code, ..})
+            if code == Code::H3_NO_ERROR.value()
+        );
+    };
+
+    tokio::join!(server_fut, client_fut);
+}

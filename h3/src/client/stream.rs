@@ -260,6 +260,28 @@ where
         self.inner.stop_stream(error_code);
     }
 
+    /// Waits for the peer to stop the sending side of the stream with `STOP_SENDING`.
+    ///
+    /// No write needs to be pending, so this can be polled while waiting for the application
+    /// to produce the request body, to cancel it as soon as the peer is no longer interested.
+    ///
+    /// Returns `Ok(Some(code))` with the error code of the peer's `STOP_SENDING`, or `Ok(None)`
+    /// once the sending side is closed and the peer can no longer stop it, for example after
+    /// [`RequestStream::finish`] and the peer acknowledging all the data.
+    pub async fn stopped(&mut self) -> Result<Option<Code>, StreamError> {
+        future::poll_fn(|cx| self.poll_stopped(cx)).await
+    }
+
+    /// Polls for the peer stopping the sending side of the stream with `STOP_SENDING`.
+    ///
+    /// See [`RequestStream::stopped`].
+    pub fn poll_stopped(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Code>, StreamError>> {
+        self.inner.poll_stopped(cx)
+    }
+
     /// Send a set of trailers to end the request.
     ///
     /// [`RequestStream::finish()`] must be called to finalize a request.

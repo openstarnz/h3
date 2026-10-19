@@ -342,6 +342,13 @@ where
         self.send.reset(reset_code)
     }
 
+    fn poll_stopped(
+        &mut self,
+        cx: &mut task::Context<'_>,
+    ) -> Poll<Result<Option<u64>, StreamErrorIncoming>> {
+        self.send.poll_stopped(cx)
+    }
+
     fn send_data<D: Into<WriteBuf<B>>>(&mut self, data: D) -> Result<(), StreamErrorIncoming> {
         self.send.send_data(data)
     }
@@ -491,12 +498,30 @@ fn convert_write_error_to_stream_error(error: quinn::WriteError) -> StreamErrorI
     }
 }
 
+fn convert_stopped_error_to_stream_error(error: quinn::StoppedError) -> StreamErrorIncoming {
+    match error {
+        quinn::StoppedError::ConnectionLost(connection_error) => {
+            StreamErrorIncoming::ConnectionErrorIncoming {
+                connection_error: convert_connection_error(connection_error),
+            }
+        }
+        error @ quinn::StoppedError::ZeroRttRejected => {
+            StreamErrorIncoming::Unknown(Box::new(error))
+        }
+    }
+}
+
+type StoppedFuture =
+    Pin<Box<dyn Future<Output = Result<Option<VarInt>, quinn::StoppedError>> + Send + Sync>>;
+
 /// Quinn-backed send stream
 ///
 /// Implements a [`quic::SendStream`] backed by a [`quinn::SendStream`].
 pub struct SendStream<B: Buf> {
     stream: quinn::SendStream,
     writing: Option<WriteBuf<B>>,
+    // Only allocated once `poll_stopped` is first used
+    stopped: Option<StoppedFuture>,
 }
 
 impl<B> SendStream<B>
@@ -507,6 +532,7 @@ where
         Self {
             stream,
             writing: None,
+            stopped: None,
         }
     }
 }
@@ -547,6 +573,26 @@ where
         let _ = self
             .stream
             .reset(VarInt::from_u64(reset_code).unwrap_or(VarInt::MAX));
+    }
+
+    #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
+    fn poll_stopped(
+        &mut self,
+        cx: &mut task::Context<'_>,
+    ) -> Poll<Result<Option<u64>, StreamErrorIncoming>> {
+        let stream = &self.stream;
+        let stopped = self
+            .stopped
+            .get_or_insert_with(|| Box::pin(stream.stopped()));
+        let result = ready!(stopped.as_mut().poll(cx));
+        // The future does not outlive its result. Quinn keeps the stream state, so polling again
+        // creates a new one that resolves to the same result immediately.
+        self.stopped = None;
+        Poll::Ready(
+            result
+                .map(|code| code.map(VarInt::into_inner))
+                .map_err(convert_stopped_error_to_stream_error),
+        )
     }
 
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]

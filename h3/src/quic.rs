@@ -195,6 +195,20 @@ pub trait SendStream<B: Buf> {
     /// Send a QUIC reset code.
     fn reset(&mut self, reset_code: u64);
 
+    /// Poll for the peer stopping the stream with a `STOP_SENDING` frame.
+    ///
+    /// This does not need a write to be pending, so it can be polled while waiting for the
+    /// application to produce data, to learn that the peer no longer wants it.
+    ///
+    /// Resolves to `Ok(Some(error_code))` with the error code of the peer's `STOP_SENDING`
+    /// frame, or to `Ok(None)` once the sending side is closed and the peer can no longer stop
+    /// it, for example after the stream was finished and the peer acknowledged all its data.
+    /// Resolves to an error if the connection is lost.
+    fn poll_stopped(
+        &mut self,
+        cx: &mut task::Context<'_>,
+    ) -> Poll<Result<Option<u64>, StreamErrorIncoming>>;
+
     /// Get QUIC send stream id
     fn send_id(&self) -> StreamId;
 }

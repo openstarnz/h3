@@ -1102,6 +1102,19 @@ where
         self.stream.reset(code.into());
     }
 
+    /// Poll for the peer stopping the sending side of the stream
+    #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
+    pub fn poll_stopped(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<Result<Option<Code>, StreamError>> {
+        self.stream.poll_stopped(cx).map(|result| {
+            result
+                .map(|code| code.map(Code::from))
+                .map_err(|e| self.handle_quic_stream_error(e))
+        })
+    }
+
     #[allow(missing_docs)]
     #[cfg_attr(feature = "tracing", instrument(skip_all, level = "trace"))]
     pub async fn finish(&mut self) -> Result<(), StreamError> {

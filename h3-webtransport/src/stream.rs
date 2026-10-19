@@ -1,6 +1,7 @@
 use std::task::Poll;
 
 use bytes::{Buf, Bytes};
+use futures_util::future::poll_fn;
 use h3::{
     quic::{self, StreamErrorIncoming},
     stream::BufRecvStream,
@@ -95,6 +96,17 @@ impl<S, B> SendStream<S, B> {
     pub(crate) fn new(stream: BufRecvStream<S, B>) -> Self {
         Self { stream }
     }
+
+    /// Waits for the peer to stop this stream with `STOP_SENDING`.
+    ///
+    /// See [`quic::SendStream::poll_stopped`].
+    pub async fn stopped(&mut self) -> Result<Option<u64>, StreamErrorIncoming>
+    where
+        S: quic::SendStream<B>,
+        B: Buf,
+    {
+        poll_fn(|cx| quic::SendStream::poll_stopped(self, cx)).await
+    }
 }
 
 impl<S, B> quic::SendStreamUnframed<B> for SendStream<S, B>
@@ -125,6 +137,13 @@ where
 
     fn reset(&mut self, reset_code: u64) {
         self.stream.reset(reset_code)
+    }
+
+    fn poll_stopped(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<Option<u64>, StreamErrorIncoming>> {
+        self.stream.poll_stopped(cx)
     }
 
     fn send_id(&self) -> quic::StreamId {
@@ -221,6 +240,17 @@ impl<S, B> BidiStream<S, B> {
     pub(crate) fn new(stream: BufRecvStream<S, B>) -> Self {
         Self { stream }
     }
+
+    /// Waits for the peer to stop this stream with `STOP_SENDING`.
+    ///
+    /// See [`quic::SendStream::poll_stopped`].
+    pub async fn stopped(&mut self) -> Result<Option<u64>, StreamErrorIncoming>
+    where
+        S: quic::SendStream<B>,
+        B: Buf,
+    {
+        poll_fn(|cx| quic::SendStream::poll_stopped(self, cx)).await
+    }
 }
 
 impl<S, B> quic::SendStream<B> for BidiStream<S, B>
@@ -237,6 +267,13 @@ where
 
     fn reset(&mut self, reset_code: u64) {
         self.stream.reset(reset_code)
+    }
+
+    fn poll_stopped(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<Option<u64>, StreamErrorIncoming>> {
+        self.stream.poll_stopped(cx)
     }
 
     fn send_id(&self) -> quic::StreamId {

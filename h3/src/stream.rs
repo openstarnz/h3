@@ -544,6 +544,13 @@ where
         self.stream.reset(reset_code)
     }
 
+    fn poll_stopped(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Result<Option<u64>, StreamErrorIncoming>> {
+        self.stream.poll_stopped(cx)
+    }
+
     fn send_id(&self) -> quic::StreamId {
         self.stream.send_id()
     }
