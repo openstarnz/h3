@@ -85,6 +85,14 @@ where
     ) -> Result<Self, StreamError> {
         let shared = conn.inner.shared.clone();
 
+        //= https://datatracker.ietf.org/doc/html/draft-ietf-webtrans-http3-16#section-7.1
+        //# For this reason, the server MUST NOT process
+        //# any incoming WebTransport requests until the client's SETTINGS have
+        //# been received.
+        poll_fn(|cx| conn.poll_peer_settings(cx))
+            .await
+            .map_err(StreamError::ConnectionError)?;
+
         let config = shared.settings();
 
         if !config.enable_webtransport() {
